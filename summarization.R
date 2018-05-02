@@ -213,16 +213,24 @@ if (!model_exists) {
     decoder_target_data,
     batch_size = batch_size,
     epochs = num_epochs,
-    validation_split = 0.2
+    validation_split = 0.2,
+    callbacks = list(
+      callback_early_stopping(patience = 3),
+      callback_reduce_lr_on_plateau(patience = 3),
+      callback_tensorboard(log_dir = "/tmp",
+                          # histogram_freq = 1,
+                           write_grads = TRUE,
+                           write_images = TRUE,
+                           embeddings_freq = 1))
   )
   
-  training_model %>% save_model_hdf5(paste0(model_name, ".hdf5"))
-  training_model%>% save_model_weights_hdf5 (paste0(model_name, "_weights.hdf5"))
+  training_model %>% save_model_weights_hdf5 (paste0(model_name, "_weights.hdf5"))
   plot(history)
+  
 } else {
-  # tbd
+  training_model %>% load_model_weights_hdf5(paste0(model_name, "_weights.hdf5"))
 }
-
+  
 # Inference model ---------------------------------------------------------
 # for inference, we take as input 
 # at first: the start token and the hidden state from the encoder,
