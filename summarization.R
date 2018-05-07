@@ -17,7 +17,6 @@ source("read_data.R")
 
 # Things to add/explore -----------------------------------------------------------
 
-# LSTM
 # bidirectional RNNs
 # dropout
 # batch normalization
@@ -126,7 +125,7 @@ embedding_dim <- 100
 dim_gru_lstm <- 50
 
 batch_size <- 1
-num_epochs <- 100
+num_epochs <- 1
 
 # whether to use LSTM or GRU, and whether to use bidirectional RNNs
 rnn_type <- "GRU"
@@ -134,8 +133,8 @@ rnn_type <- "GRU"
 #rnn_type <- "LSTM"
 #rnn_type <- "LSTM_BIDIRECTIONAL"
 
-model_name <- paste0("seq2seq_summarise_", rnn_type)
-model_exists <- FALSE
+model_name <- paste0("seq2seq_summarise_", rnn_type, "_", language)
+model_exists <- TRUE
 
 # Model for training ----------------------------------------------------------
 # for training, we feed the actual targets, offset by 1, as an additional input
@@ -156,6 +155,10 @@ encoder_rnn <- switch(rnn_type,
                       GRU = layer_gru(
                         units = dim_gru_lstm, return_state =
                           TRUE
+                      ),
+                      LSTM = layer_lstm(
+                        units = dim_gru_lstm, return_state =
+                          TRUE
                       ))
 
 # from the encoder RNN, all we need are the states, not the outputs
@@ -163,7 +166,7 @@ encoder_rnn <- switch(rnn_type,
 if (rnn_type == "GRU") {
   c(., encoder_h) %<-% (encoder_inputs_embedded %>% encoder_rnn())
 } else if (rnn_type == "LSTM") {
-  c(., encoder_h, encoder_c) %<-% (encoder %>% layer_lstm(units = encoder_units, return_state=TRUE))
+  c(., encoder_h, encoder_c) %<-% (encoder_inputs_embedded %>% encoder_rnn())
 }
 
 
@@ -179,6 +182,10 @@ decoder_inputs_embedded <-
 # We don't use the return states in the training model, but we will use them in inference.
 decoder_rnn <- switch(rnn_type,
                       GRU = layer_gru(
+                        units = dim_gru_lstm, return_state =
+                          TRUE, return_sequences = TRUE
+                      ),
+                      LSTM = layer_lstm(
                         units = dim_gru_lstm, return_state =
                           TRUE, return_sequences = TRUE
                       ))
@@ -244,7 +251,9 @@ end_token <- tok$word_index$endtoken
 # the encoder model for inference takes the encoder inputs and outputs the hidden states
 # here we reuse (access) the trained weights from the training model
 inference_model_encoder <-
-  keras_model(input = encoder_inputs, output = encoder_h)
+  keras_model(input = encoder_inputs, output = switch(rnn_type,
+                                                      GRU = encoder_h,
+                                                      LSTM = list(encoder_h, encoder_c)))
 inference_model_encoder
 
 # the decoder takes as input the hidden states from the encoder
@@ -253,7 +262,7 @@ if (rnn_type == "GRU") {
 } else if (rnn_type == "LSTM") {
   decoder_state_input_h <- layer_input(shape = c(dim_gru_lstm))
   decoder_state_input_c <- layer_input(shape = c(dim_gru_lstm))
-  decoder_state_inputs <- list(decoder_state_input_h, decoder_state_input_c)
+ # decoder_state_inputs <- list(decoder_state_input_h, decoder_state_input_c)
 }
 
 # here we reuse (access) the decoder rnn's weights from the training model
@@ -261,9 +270,10 @@ if (rnn_type == "GRU") {
   c(decoder_output, state_h) %<-% decoder_rnn(decoder_inputs_embedded,
                                               initial_state = decoder_state_input_h)
 } else if (rnn_type == "LSTM") {
-  c(decoder_output, state_h, state_c) %<-% decoder_rnn(
-  decoder_inputs_embedded, initial_state = decoder_state_inputs)
-  decoder_states <- list(state_h, state_c)
+  c(decoder_output, state_h, state_c) %<-% decoder_rnn(decoder_inputs_embedded,
+                                                       initial_state = c(decoder_state_input_h,
+                                                                            decoder_state_input_c))
+  #decoder_states <- list(state_h, state_c)
 }
 
 # dense layer for outputting word probabilities
@@ -276,8 +286,12 @@ decoder_output <-
 # and outputs the word probabilities as well as the hidden state after running the decoder RNN
 inference_model_decoder <-
   keras_model(
-    inputs = c(decoder_inputs, decoder_state_input_h),
-    outputs = c(decoder_output, state_h)
+    inputs = switch(rnn_type,
+                    GRU = c(decoder_inputs, decoder_state_input_h),
+                    LSTM = c(decoder_inputs, list(decoder_state_input_h, decoder_state_input_c))),
+    outputs = switch(rnn_type,
+                     GRU = c(decoder_output, state_h),
+                     LSTM = c(decoder_output, list(state_h, state_c)))
   )
 
 inference_model_decoder
@@ -309,7 +323,11 @@ decode_sequence <- function(input_seq) {
     
     # decoder model predicts from the last hidden state (at first, the encoder's, then, its own)
     # together with the last generated token
-    c(output_tokens, h) %<-% (inference_model_decoder %>% predict(list(generated, states_value)))
+    if (rnn_type == "GRU") {
+      c(output_tokens, h) %<-% (inference_model_decoder %>% predict(list(generated, states_value)))
+    } else if (rnn_type == "LSTM") {
+      c(output_tokens, h, c) %<-% (inference_model_decoder %>% predict(c(generated, states_value)))
+    }
     
     # Sample a token
     sampled_token_index <- which.max(output_tokens[1, 1,])
