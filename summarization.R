@@ -3,9 +3,13 @@ library(purrr)
 library(stringr)
 library(ggplot2)
 library(tidytext)
+library(rprojroot)
 
-source("read_data.R")
-
+model_dir <-
+  file.path(find_root(criterion = is_rstudio_project), "models")
+code_dir <- 
+  file.path(find_root(criterion = is_rstudio_project), "initial_exploration")
+source(file.path(code_dir, "read_data.R"))
 
 # Purpose -----------------------------------------------------------------
 
@@ -17,7 +21,6 @@ source("read_data.R")
 
 # Things to add/explore -----------------------------------------------------------
 
-# bidirectional RNNs
 # dropout
 # batch normalization
 # attention
@@ -128,13 +131,13 @@ batch_size <- 1
 num_epochs <- 1
 
 # whether to use LSTM or GRU, and whether to use bidirectional RNNs
-rnn_type <- "GRU"
+#rnn_type <- "GRU"
 #rnn_type <- "GRU_BIDIRECTIONAL"
 #rnn_type <- "LSTM"
-#rnn_type <- "LSTM_BIDIRECTIONAL"
+rnn_type <- "LSTM_BIDIRECTIONAL"
 
-model_name <- paste0("seq2seq_summarise_", rnn_type, "_", language)
-model_exists <- TRUE
+model_name <- file.path(model_dir, paste0("seq2seq_summarise_", rnn_type, "_", language, "_", epochs))
+model_exists <- FALSE
 
 # Model for training ----------------------------------------------------------
 # for training, we feed the actual targets, offset by 1, as an additional input
@@ -151,15 +154,21 @@ encoder_inputs_embedded <-
                                      mask_zero = TRUE)
 
 # the encoding RNN returns states as well as outputs
-encoder_rnn <- switch(rnn_type,
-                      GRU = layer_gru(
-                        units = dim_gru_lstm, return_state =
-                          TRUE
-                      ),
-                      LSTM = layer_lstm(
-                        units = dim_gru_lstm, return_state =
-                          TRUE
-                      ))
+encoder_rnn <- switch(
+  rnn_type,
+  GRU = layer_gru(units = dim_gru_lstm, return_state =
+                    TRUE),
+  LSTM = layer_lstm(units = dim_gru_lstm, return_state =
+                      TRUE),
+  GRU_BIDIRECTIONAL = bidirectional(layer = layer_gru(
+    units = dim_gru_lstm, return_state =
+      TRUE
+  )),
+  LSTM_BIDIRECTIONAL = bidirectional(layer = layer_lstm(
+    units = dim_gru_lstm, return_state =
+      TRUE
+  ))
+)
 
 # from the encoder RNN, all we need are the states, not the outputs
 # the states will serve as context for the decoder
@@ -167,6 +176,10 @@ if (rnn_type == "GRU") {
   c(., encoder_h) %<-% (encoder_inputs_embedded %>% encoder_rnn())
 } else if (rnn_type == "LSTM") {
   c(., encoder_h, encoder_c) %<-% (encoder_inputs_embedded %>% encoder_rnn())
+} else if (rnn_type == "GRU_BIDIRECTIONAL") {
+  c(., encoder_h_forward, encoder_h_backward) %<-% (encoder_inputs_embedded %>% encoder_rnn())
+} else if (rnn_type == "LSTM_BIDIRECTIONAL") {
+  c(., encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward) %<-% (encoder_inputs_embedded %>% encoder_rnn())
 }
 
 
@@ -188,13 +201,27 @@ decoder_rnn <- switch(rnn_type,
                       LSTM = layer_lstm(
                         units = dim_gru_lstm, return_state =
                           TRUE, return_sequences = TRUE
-                      ))
+                      ),
+                      GRU_BIDIRECTIONAL = bidirectional(layer = layer_gru(
+                        units = dim_gru_lstm, return_state =
+                          TRUE, return_sequences = TRUE
+                      )),
+                      LSTM_BIDIRECTIONAL = bidirectional(layer = layer_lstm(
+                        units = dim_gru_lstm, return_state =
+                          TRUE, return_sequences = TRUE
+                      )))
 # the decoder rnn gets its initial state from the hidden state of the encoder
 # here we neglect the decoder rnn's hidden state
 if (rnn_type == "GRU") {
   c(decoder_output, .) %<-% (decoder_inputs_embedded %>% decoder_rnn(initial_state = encoder_h))
 } else if (rnn_type == "LSTM") {
   c(decoder_output, ., .) %<-% (decoder_inputs_embedded %>% decoder_rnn(initial_state = c(encoder_h, encoder_c)))
+} else if (rnn_type == "GRU_BIDIRECTIONAL") {
+  c(decoder_output, ., .) %<-% (decoder_inputs_embedded %>% decoder_rnn(initial_state = list(
+    encoder_h_forward, encoder_h_backward)))
+} else if (rnn_type == "LSTM_BIDIRECTIONAL") {
+  c(decoder_output, ., ., ., .) %<-% (decoder_inputs_embedded %>% decoder_rnn(initial_state = list(
+    encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward))) 
 }
 
 
@@ -253,7 +280,12 @@ end_token <- tok$word_index$endtoken
 inference_model_encoder <-
   keras_model(input = encoder_inputs, output = switch(rnn_type,
                                                       GRU = encoder_h,
-                                                      LSTM = list(encoder_h, encoder_c)))
+                                                      LSTM = list(encoder_h, encoder_c),
+                                                      GRU_BIDIRECTIONAL = list(
+                                                        encoder_h_forward, encoder_h_backward),
+                                                      LSTM_BIDIRECTIONAL = list(
+                                                        encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward))) 
+                                                    
 inference_model_encoder
 
 # the decoder takes as input the hidden states from the encoder
@@ -262,7 +294,14 @@ if (rnn_type == "GRU") {
 } else if (rnn_type == "LSTM") {
   decoder_state_input_h <- layer_input(shape = c(dim_gru_lstm))
   decoder_state_input_c <- layer_input(shape = c(dim_gru_lstm))
- # decoder_state_inputs <- list(decoder_state_input_h, decoder_state_input_c)
+} else if (rnn_type == "GRU_BIDIRECTIONAL") {
+  decoder_state_input_h_forward <- layer_input(shape = c(dim_gru_lstm))
+  decoder_state_input_h_backward <- layer_input(shape = c(dim_gru_lstm))
+} else if (rnn_type == "LSTM_BIDIRECTIONAL") {
+  decoder_state_input_h_forward <- layer_input(shape = c(dim_gru_lstm))
+  decoder_state_input_c_forward <- layer_input(shape = c(dim_gru_lstm))
+  decoder_state_input_h_backward <- layer_input(shape = c(dim_gru_lstm))
+  decoder_state_input_c_backward <- layer_input(shape = c(dim_gru_lstm))
 }
 
 # here we reuse (access) the decoder rnn's weights from the training model
@@ -273,7 +312,16 @@ if (rnn_type == "GRU") {
   c(decoder_output, state_h, state_c) %<-% decoder_rnn(decoder_inputs_embedded,
                                                        initial_state = c(decoder_state_input_h,
                                                                             decoder_state_input_c))
-  #decoder_states <- list(state_h, state_c)
+} else if (rnn_type == "GRU_BIDIRECTIONAL") {
+  c(decoder_output, state_h_forward, state_h_backward) %<-% decoder_rnn(decoder_inputs_embedded,
+                                              initial_state = list(decoder_state_input_h_forward,
+                                                                   decoder_state_input_h_backward))
+} else if (rnn_type == "LSTM_BIDIRECTIONAL") {
+  c(decoder_output, state_h_forward, state_c_forward, state_h_backward, state_c_backward) %<-% decoder_rnn(decoder_inputs_embedded,
+                                                                       initial_state = list(decoder_state_input_h_forward,
+                                                                                            decoder_state_input_c_forward,
+                                                                                            decoder_state_input_h_backward,
+                                                                                            decoder_state_input_c_backward))
 }
 
 # dense layer for outputting word probabilities
@@ -288,10 +336,19 @@ inference_model_decoder <-
   keras_model(
     inputs = switch(rnn_type,
                     GRU = c(decoder_inputs, decoder_state_input_h),
-                    LSTM = c(decoder_inputs, list(decoder_state_input_h, decoder_state_input_c))),
+                    LSTM = c(decoder_inputs, list(decoder_state_input_h, decoder_state_input_c)),
+                    GRU_BIDIRECTIONAL = c(decoder_inputs, decoder_state_input_h_forward,
+                                          decoder_state_input_h_backward),
+                    LSTM_BIDIRECTIONAL = c(decoder_inputs, decoder_state_input_h_forward,
+                                           decoder_state_input_c_forward,
+                                           decoder_state_input_h_backward,
+                                           decoder_state_input_c_backward)),
     outputs = switch(rnn_type,
                      GRU = c(decoder_output, state_h),
-                     LSTM = c(decoder_output, list(state_h, state_c)))
+                     LSTM = c(decoder_output, list(state_h, state_c)),
+                     GRU_BIDIRECTIONAL = c(decoder_output, state_h_forward, state_h_backward),
+                     LSTM_BIDIRECTIONAL = c(decoder_output, state_h_forward, state_c_forward,
+                                            state_h_backward, state_c_backward))
   )
 
 inference_model_decoder
@@ -327,6 +384,10 @@ decode_sequence <- function(input_seq) {
       c(output_tokens, h) %<-% (inference_model_decoder %>% predict(list(generated, states_value)))
     } else if (rnn_type == "LSTM") {
       c(output_tokens, h, c) %<-% (inference_model_decoder %>% predict(c(generated, states_value)))
+    } else if (rnn_type == "GRU_BIDIRECTIONAL") {
+      c(output_tokens, h_forward, h_backward) %<-% (inference_model_decoder %>% predict(c(generated, states_value)))
+    } else if (rnn_type == "LSTM_BIDIRECTIONAL") {
+      c(output_tokens, h_forward, c_forward, h_backward, c_backward) %<-% (inference_model_decoder %>% predict(c(generated, states_value)))
     }
     
     # Sample a token
@@ -348,6 +409,10 @@ decode_sequence <- function(input_seq) {
       states_value <- h
     } else if (rnn_type == "LSTM") {
       states_value <- list(h, c)
+    } else if (rnn_type == "GRU_BIDIRECTIONAL") {
+      states_value <- list(h_forward, h_backward)
+    } else if (rnn_type == "LSTM_BIDIRECTIONAL") {
+      states_value <- list(h_forward, c_forward, h_backward, c_backward)
     }
    
     iteration <- iteration + 1
