@@ -7,7 +7,7 @@ library(rprojroot)
 
 model_dir <-
   file.path(find_root(criterion = is_rstudio_project), "models")
-code_dir <- 
+code_dir <-
   file.path(find_root(criterion = is_rstudio_project), "initial_exploration")
 source(file.path(code_dir, "read_data.R"))
 
@@ -143,7 +143,7 @@ model_exists <- FALSE
 # for training, we feed the actual targets, offset by 1, as an additional input
 # F. Chollet: "Effectively, the decoder learns to generate targets[t+1...] given targets[...t], conditioned on the input sequence."
 
-# input layer dimension is batch size * maximum length of input text 
+# input layer dimension is batch size * maximum length of input text
 # input text is encoded as integers
 encoder_inputs  <- layer_input(shape = list(max_len_text))
 
@@ -184,7 +184,7 @@ if (rnn_type == "GRU") {
 
 
 # the decoder takes as input the actual target sequence, but offset by 1 (teacher forcing)
-decoder_inputs <- layer_input(shape = list(NULL)) 
+decoder_inputs <- layer_input(shape = list(NULL))
 # we also embed the abstracts
 decoder_inputs_embedded <-
   decoder_inputs %>% layer_embedding(input_dim = vocab_length,
@@ -221,15 +221,15 @@ if (rnn_type == "GRU") {
     encoder_h_forward, encoder_h_backward)))
 } else if (rnn_type == "LSTM_BIDIRECTIONAL") {
   c(decoder_output, ., ., ., .) %<-% (decoder_inputs_embedded %>% decoder_rnn(initial_state = list(
-    encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward))) 
+    encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward)))
 }
 
 
 # we feed the decoder rnn's output to a dense layer with softmax activation
 # this output will need the target one-hot-encoded
-encoder_dense <- layer_dense(units = num_decoder_tokens, activation =
+decoder_dense <- layer_dense(units = num_decoder_tokens, activation =
                                'softmax')
-decoder_output <- decoder_output %>% encoder_dense()
+decoder_output <- decoder_output %>% decoder_dense()
 
 # the training model takes as inputs the text input to the encoder and
 # the offset-by-1 abstract input to the decoder, and as output the one-hot-encoded abstracts
@@ -257,16 +257,16 @@ if (!model_exists) {
                            write_images = TRUE,
                            embeddings_freq = 1))
   )
-  
+
   training_model %>% save_model_weights_hdf5 (paste0(model_name, "_weights.hdf5"))
   plot(history)
-  
+
 } else {
   training_model %>% load_model_weights_hdf5(paste0(model_name, "_weights.hdf5"))
 }
-  
+
 # Inference model ---------------------------------------------------------
-# for inference, we take as input 
+# for inference, we take as input
 # at first: the start token and the hidden state from the encoder,
 # and then: the last word generated and the hidden state from the decoder RNN
 # accordingly, at every step we produce
@@ -284,8 +284,8 @@ inference_model_encoder <-
                                                       GRU_BIDIRECTIONAL = list(
                                                         encoder_h_forward, encoder_h_backward),
                                                       LSTM_BIDIRECTIONAL = list(
-                                                        encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward))) 
-                                                    
+                                                        encoder_h_forward, encoder_c_forward, encoder_h_backward, encoder_c_backward)))
+
 inference_model_encoder
 
 # the decoder takes as input the hidden states from the encoder
@@ -327,9 +327,9 @@ if (rnn_type == "GRU") {
 # dense layer for outputting word probabilities
 # here we reuse (access) the trained weights from the training model
 decoder_output <-
-  decoder_output %>% encoder_dense()
+  decoder_output %>% decoder_dense()
 
-# the decoder model for inference takes as inputs the current sequence generated and 
+# the decoder model for inference takes as inputs the current sequence generated and
 # the hidden state from the encoder,
 # and outputs the word probabilities as well as the hidden state after running the decoder RNN
 inference_model_decoder <-
@@ -364,20 +364,20 @@ inference_model_decoder
 
 
 decode_sequence <- function(input_seq) {
-  
+
   # use the encoder model to get the hidden state for this input sequence
   states_value <- inference_model_encoder %>% predict(input_seq)
   # last word of generated sequence, initially that's the start token
   generated <- array(start_token, dim = c(1, 1))
-  
+
   # Sampling loop - presupposes batch size of 1
   stop_condition <- FALSE
   decoded_sentence <- ""
   iteration <- 1
-  
+
   # sample until either stop token is produced or the maximum summary length has been reached
   while (!stop_condition && iteration < max_len_abstract) {
-    
+
     # decoder model predicts from the last hidden state (at first, the encoder's, then, its own)
     # together with the last generated token
     if (rnn_type == "GRU") {
@@ -389,21 +389,21 @@ decode_sequence <- function(input_seq) {
     } else if (rnn_type == "LSTM_BIDIRECTIONAL") {
       c(output_tokens, h_forward, c_forward, h_backward, c_backward) %<-% (inference_model_decoder %>% predict(c(generated, states_value)))
     }
-    
+
     # Sample a token
     sampled_token_index <- which.max(output_tokens[1, 1,])
     sampled_word <-
       attr(tok$word_index, "name")[[sampled_token_index]]
     decoded_sentence <- paste(decoded_sentence, sampled_word)
-    
+
     # Exit condition: either hit max length or find stop character.
     if (sampled_token_index == end_token) {
       stop_condition <- True
     }
-    
+
     # Update the last word of generated sequence (of length 1).
     generated <- array(sampled_token_index, dim = c(1,1))
-    
+
     # update state
     if (rnn_type == "GRU") {
       states_value <- h
@@ -414,9 +414,9 @@ decode_sequence <- function(input_seq) {
     } else if (rnn_type == "LSTM_BIDIRECTIONAL") {
       states_value <- list(h_forward, c_forward, h_backward, c_backward)
     }
-   
+
     iteration <- iteration + 1
-    
+
   }
   decoded_sentence
 }
